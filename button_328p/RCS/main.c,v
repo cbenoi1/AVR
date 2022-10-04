@@ -1,0 +1,690 @@
+head	1.6;
+access;
+symbols;
+locks
+	claude:1.6; strict;
+comment	@ * @;
+
+
+1.6
+date	2022.06.16.01.50.24;	author claude;	state Exp;
+branches;
+next	1.5;
+
+1.5
+date	2022.06.16.01.43.43;	author claude;	state Exp;
+branches;
+next	1.4;
+
+1.4
+date	2022.06.12.18.57.10;	author claude;	state Exp;
+branches;
+next	1.3;
+
+1.3
+date	2022.06.12.14.05.05;	author claude;	state Exp;
+branches;
+next	1.2;
+
+1.2
+date	2022.05.09.17.33.40;	author claude;	state Exp;
+branches;
+next	1.1;
+
+1.1
+date	2022.04.30.00.43.17;	author claude;	state Exp;
+branches;
+next	;
+
+
+desc
+@start
+@
+
+
+1.6
+log
+@updated from eclipse.
+@
+text
+@//======================================================================
+// $RCSfile: main.c,v $
+// $Revision: 1.5 $
+// $Date: 2022/06/16 01:43:43 $
+// $Author: claude $
+//======================================================================
+//
+//	BUTTON:	Debounced multiple buttons using a timer + LED 4 x 8
+//
+//	BOARD:	Arduino Uno v3 (Abra Electronics)
+//		16MHz external clock
+//
+//	SHIELD: Arduino Multifunction Shield
+//
+//	WIRING:
+//		DEFAULT LED:	PB5
+//		LEDS: 			PB2...4
+//		BUTTONS:		PC1...3
+//		DIGITS:			CLK(PD7) + CS(PD4) + DO(PB0)
+//
+//      Calculations for TIMERs
+//              16MHz / 1024            = 15625      -- 1s
+//              16MHz / 1024  / 20      = 781        -- 50ms
+//              16MHz / 1024  / 100     = 156        -- 10ms
+//              16MHz / 1024  / 1000    = 16         -- 1ms
+//
+//              TNCT0 = 256   - 16    = 240          -- 1ms timer
+//              TNCT1 = 65536 - 15625 = 49911        -- 1s timer
+//
+//======================================================================
+// (c) 2022 Claude Benoit - All Right Reserved
+//======================================================================
+//#define F_CPU 16000000UL	// 16MHz -- passed by compiler -D
+#include <avr/io.h>
+#include <avr/interrupt.h>
+
+//--------------------------------
+//---- Defines
+//--------------------------------
+#define	TM0_COUNT		240			// 10ms - See calculations above
+#define	TM1_COUNT		49911		// 1s   - See calculations above
+#define	CNT_DEBOUNCE	50			// Debounce delay (# of 1ms)
+#define	CNT_LED4X8		5			// LED4X8 update rate (# of 1ms)
+#define	BIT_DEFAULT_LED	0b00100000	// DEFAULT LED -- Port B, Bit 5
+#define	BIT_LED1		0b00000100	// LED1        -- Port B, Bit 2
+#define	BIT_LED2		0b00001000	// LED2        -- Port B, Bit 3
+#define	BIT_LED3		0b00010000	// LED3        -- Port B, Bit 4
+#define	BIT_BUT1		0b00000010	// BUTTON1 -- Port C, Bit 1
+#define	BIT_BUT2		0b00000100	// BUTTON2 -- Port C, Bit 2
+#define	BIT_BUT3		0b00001000	// BUTTON3 -- Port C, Bit 3
+#define	BIT_LED_ALL		(BIT_LED1 | BIT_LED2 | BIT_LED3)
+#define	BIT_BUT_ALL		(BIT_BUT1 | BIT_BUT2 | BIT_BUT3)
+
+//--------------------------------
+//---- Macros
+//--------------------------------
+#define	LED4X8_PIN_CLK_LOW()	PORTD &= 0b01111111		// PD7
+#define	LED4X8_PIN_CLK_HIGH()	PORTD |= 0b10000000
+#define	LED4X8_PIN_CS_LOW()		PORTD &= 0b11101111		// PD4
+#define	LED4X8_PIN_CS_HIGH()	PORTD |= 0b00010000
+#define	LED4X8_PIN_DO_LOW()		PORTB &= 0b11111110		// PB0
+#define	LED4X8_PIN_DO_HIGH()	PORTB |= 0b00000001
+#define	LED4X8_SETVALUE(x,y)	g_uDigit[ (x) ] = (uint8_t) ( (y) < 0 ? 0xFF : g_uLED[ (y) ] );
+
+//--------------------------------
+//---- Global variables
+//--------------------------------
+static volatile uint8_t		g_uButtonsPulse;
+static const	uint8_t		g_uLED[]   = { 0xC0, 0xF9, 0xA4, 0xB0, 0x99, 0x92, 0x82, 0xF8, 0x80, 0x90 };
+static const	uint8_t		g_uSEGS[]  = { 0xF1, 0xF2, 0xF4, 0xF8 };
+static volatile	uint8_t		g_uDigit[4];
+static volatile	uint8_t		g_uCurrDigit;
+static volatile	uint8_t		g_uLed4x8Pulse;
+
+//--------------------------------
+//---- Static functions
+//--------------------------------
+static	void led4x8_shift_out( uint8_t );
+static	void button_process( uint8_t in_uState );
+
+//======================================================================
+//==== ISR - TIMER 0 Interrupt Service Routine
+//======================================================================
+ISR( TIMER0_OVF_vect )
+{
+	TCNT0  = TM0_COUNT;			// Reset count
+	if ( g_uButtonsPulse )	g_uButtonsPulse--;
+	if ( g_uLed4x8Pulse )	g_uLed4x8Pulse--;
+}
+
+//======================================================================
+//==== ISR - TIMER 1 Interrupt Service Routine
+//======================================================================
+ISR( TIMER1_OVF_vect )
+{
+	TCNT1  = TM1_COUNT;			// Reset count
+	PORTB ^= BIT_DEFAULT_LED;	// Toggle DEFAULT LED
+}
+
+//======================================================================
+//==== MAIN
+//======================================================================
+int main()
+{
+	//---- Initialize TIMER 0
+	TCNT0	= TM0_COUNT;	// Reset count for TIMER 0 (8 bits)
+	TCCR0A	= 0b00000000;	// Timer/Counter 1 Register A - Reset
+	TCCR0B	= 0b00000101;	// Timer/Control 1 Register B - Set 1024 prescaler
+	TIMSK0	= 0b00000001;	// Timer/Counter 1 Interrupt Mask Resigter - Overflow Interrupt Overflow Enabled
+
+	//---- Initialize TIMER 1
+	TCNT1	= TM1_COUNT;	// Reset count for TIMER 1 (16 bits)
+	TCCR1A	= 0b00000000;	// Timer/Counter 1 Register A - Reset
+	TCCR1B	= 0b00000101;	// Timer/Control 1 Register B - Set 1024 prescaler
+	TIMSK1	= 0b00000001;	// Timer/Counter 1 Interrupt Mask Resigter - Overflow Interrupt Overflow Enabled
+
+	//---- Setup DEFAULT LED
+	DDRB	|= BIT_LED_ALL | BIT_DEFAULT_LED;	// Enable LEDs as OUTPUT
+	PORTB	|= BIT_LED_ALL;						// Set LEDs to OFF
+
+	//---- Setup LED4X8
+	DDRB	|= 0b00000001;		// DO(PB0)
+	DDRD	|= 0b10010000;		// CLK(PD7) + CS(PD4)
+	LED4X8_PIN_CLK_LOW();
+	LED4X8_PIN_CS_HIGH();
+	g_uDigit[0]	= 0xFF;
+	g_uDigit[1]	= 0xFF;
+	g_uDigit[2]	= 0xFF;
+	g_uDigit[3] = 0xFF;
+	g_uCurrDigit	= 0;
+	g_uLed4x8Pulse	= 0;
+
+	//---- Setup Digits.
+	LED4X8_SETVALUE( 0, 0 );
+	LED4X8_SETVALUE( 1, 1 );
+	LED4X8_SETVALUE( 2, 2 );
+	LED4X8_SETVALUE( 3, 3 );
+
+	//---- Setup BUTTONs
+	uint8_t l_uOldState = PINC & BIT_BUT_ALL;
+	g_uButtonsPulse = 0;
+
+	//--------------------------------------------------
+	//---- LOOP - Infinite loop.
+	//--------------------------------------------------
+	sei();					// Enable interrupts
+	for(;;)
+	{
+		//----
+		//---- SOME OTHER IMPORTANT PROCESSING HERE
+		//----
+
+
+		//----
+		//---- LED4X8 PROCESSING
+		//----
+		if ( g_uLed4x8Pulse == 0 )
+		{
+			LED4X8_PIN_CS_LOW();
+			led4x8_shift_out( g_uDigit[ g_uCurrDigit ] );
+			led4x8_shift_out( g_uSEGS[ g_uCurrDigit ] );
+			LED4X8_PIN_CS_HIGH();
+			g_uCurrDigit++;
+			g_uCurrDigit = g_uCurrDigit % 4;
+			g_uLed4x8Pulse = CNT_LED4X8;
+		}
+
+		//----
+		//---- BUTTON PROCESSING
+		//----
+		if ( g_uButtonsPulse == 0 )
+		{
+			//---- Check button
+			uint8_t l_uNewState = PINC & BIT_BUT_ALL;
+			if ( l_uNewState != l_uOldState )
+			{
+				//---- Changed, so start a blackout period and process
+				l_uOldState			= l_uNewState;
+				g_uButtonsPulse		= CNT_DEBOUNCE;
+				button_process( l_uOldState );
+			}
+		}
+	}
+}
+
+//======================================================================
+//==== Button process - Turn on/off LEDs to indicate status
+//======================================================================
+static void button_process( uint8_t in_uState )
+{
+	if ( in_uState & BIT_BUT1 )		// BUTTON 1
+		PORTB |= BIT_LED1;
+	else
+		PORTB &= ~BIT_LED1;
+
+	if ( in_uState & BIT_BUT2 )		// BUTTON 2
+		PORTB |= BIT_LED2;
+	else
+		PORTB &= ~BIT_LED2;
+
+	if ( in_uState & BIT_BUT3 )		// BUTTON 3
+		PORTB |= BIT_LED3;
+	else
+		PORTB &= ~BIT_LED3;
+}
+
+//======================================================================
+//====
+//======================================================================
+static void led4x8_shift_out( uint8_t in_uData )
+{
+	register uint8_t	i = 8;
+	register uint8_t	msk = 0x80;
+	do {
+		if ( in_uData & msk )
+			LED4X8_PIN_DO_HIGH();
+		else
+			LED4X8_PIN_DO_LOW();
+		LED4X8_PIN_CLK_HIGH();
+		LED4X8_PIN_CLK_LOW();
+		msk >>= 1;
+		i--;
+	} while( i );
+}
+@
+
+
+1.5
+log
+@update.
+@
+text
+@d3 2
+a4 2
+// $Revision: 1.4 $
+// $Date: 2022/06/12 18:57:10 $
+d6 1
+d8 1
+a8 1
+//	BUTTON:	Debounced multiple buttons using a timer
+d13 1
+a13 1
+//	SHIELD: Multifunction
+d17 3
+a19 2
+//		LEDS: 		PB2...4
+//		BUTTONS:	PC1...3
+d21 1
+a21 1
+//      Calculations for TIMER 1
+d27 1
+a27 1
+//              TNCT0 = 256   - 156   = 100          -- 10ms timer
+d33 1
+d37 1
+a37 1
+//-----------------------------------------------------------
+d39 14
+a52 13
+//-----------------------------------------------------------
+#define	TM1_COUNT	49911		// 1s delay for default led
+#define	TM0_COUNT	100		// 10ms - See calculations above
+#define	CNT_DEBOUNCE	5		// Debounce delay (# of 10ms)
+#define	BIT_DEFAULT_LED	(1<<5)		// DEFAULT LED -- Port B, Bit 5
+#define	BIT_LED1	(1<<2)		// LED1        -- Port B, Bit 2
+#define	BIT_LED2	(1<<3)		// LED2        -- Port B, Bit 3
+#define	BIT_LED3	(1<<4)		// LED3        -- Port B, Bit 4
+#define	BIT_BUT1	(1<<1)		// BUTTON1 -- Port C, Bit 1
+#define	BIT_BUT2	(1<<2)		// BUTTON2 -- Port C, Bit 2
+#define	BIT_BUT3	(1<<3)		// BUTTON3 -- Port C, Bit 3
+#define	BIT_BUT_ALL	(BIT_BUT1 | BIT_BUT2 | BIT_BUT3)
+#define	BIT_LED_ALL	(BIT_LED1 | BIT_LED2 | BIT_LED3)
+d54 1
+a54 1
+//-----------------------------------------------------------
+d56 8
+a63 3
+//-----------------------------------------------------------
+
+#define	TOGGLE_DEBUG_LED	(PORTB ^= BIT_DEFAULT_LED)	// Toggle LED pin
+d65 1
+a65 2
+
+//-----------------------------------------------------------
+d67 13
+a79 2
+//-----------------------------------------------------------
+volatile int8_t	g_iDebounceCount = 0;	// Debounce delay count
+d81 3
+a83 3
+//--------------------------------------------------------
+//---- ISR - TIMER 0 Interrupt Service Routine 
+//--------------------------------------------------------
+d86 3
+a88 5
+	TCNT0  = TM0_COUNT;		// Reset count
+
+	//---- Update counter.
+	if ( g_iDebounceCount > 0 )
+		g_iDebounceCount--;
+d91 3
+a93 4
+
+//-----------------------------------------------------------
+//---- ISR - TIMER 1 Interrupt Service Routine 
+//-----------------------------------------------------------
+d96 2
+a97 2
+	TCNT1  = TM1_COUNT;
+	PORTB ^= BIT_DEFAULT_LED;	// Toggle LED pin
+d100 3
+a102 25
+//-----------------------------------------------------------
+//---- Button process - Turn on/off LEDs to indicate status
+//-----------------------------------------------------------
+void	button_process( uint8_t in_uState )
+{
+	if ( in_uState & BIT_BUT1 )		// BUTTON 1
+		PORTB |= BIT_LED1;
+	else
+		PORTB &= ~BIT_LED1;
+
+	if ( in_uState & BIT_BUT2 )		// BUTTON 2
+		PORTB |= BIT_LED2;
+	else
+		PORTB &= ~BIT_LED2;
+
+	if ( in_uState & BIT_BUT3 )		// BUTTON 3
+		PORTB |= BIT_LED3;
+	else
+		PORTB &= ~BIT_LED3;
+}
+
+
+//-----------------------------------------------------------
+//---- MAIN
+//-----------------------------------------------------------
+d117 3
+a119 1
+	sei();			// Enable interrupts
+d121 17
+a137 3
+	//---- Setup LEDs
+	DDRB	|= BIT_LED_ALL | BIT_DEFAULT_LED;	// Enable LEDs as OUTPUT
+	PORTB	|= BIT_LED_ALL;				// Set LEDs to OFF
+d141 1
+a141 1
+	g_iDebounceCount = 0;
+d143 1
+a143 1
+	//----
+d145 2
+a146 1
+	//----
+d150 1
+a150 1
+		//---- SOME OTHER PROCESSING HERE
+a153 1
+ 
+d155 1
+a155 1
+		//---- BUTTON CHECK
+d157 1
+a157 8
+
+		//---- Loop if debounce blackout period
+		if ( g_iDebounceCount > 0 ) continue;
+
+
+		//---- Check button
+		uint8_t l_uNewState = PINC & BIT_BUT_ALL;
+		if ( l_uNewState != l_uOldState )
+d159 7
+a165 4
+			//---- Changed or still unstable, so start another blackout
+			l_uOldState = l_uNewState;
+			g_iDebounceCount = CNT_DEBOUNCE;
+			continue;
+d167 5
+a171 3
+		
+		//---- No change and not triggered, so loop.
+		if ( !g_iDebounceCount )
+d173 9
+a181 2
+			g_iDebounceCount = -1;	// flag as still bouncy
+			continue;
+d183 2
+d186 9
+a194 3
+		//----
+		//---- PROCESSING NEW INPUTS
+		//----
+d196 4
+a199 2
+		button_process( l_uOldState );	// process the buttons
+		l_uOldState = l_uNewState;
+d201 5
+d207 17
+a223 1
+	}
+@
+
+
+1.4
+log
+@update
+@
+text
+@d3 2
+a4 2
+// $Revision: 1.3 $
+// $Date: 2022/06/12 14:05:05 $
+d15 1
+d25 2
+a26 2
+//              TNCT1 = 65536 - 156 = 65380          -- 10ms timer
+//              TNCT1 = 65536 - 781 = 64755          -- 50ms timer
+d37 2
+a38 1
+#define	TM1_COUNT	65380		// 10ms - See calculations above
+d40 4
+a43 3
+#define	BIT_LED1	(1<<2)		// LED1    -- Port B, Bit 2
+#define	BIT_LED2	(1<<3)		// LED2    -- Port B, Bit 3
+#define	BIT_LED3	(1<<4)		// LED3    -- Port B, Bit 4
+d51 7
+d60 14
+a73 1
+static	int8_t	g_iDebounceCount = 0;	// Debounce delay count
+a79 1
+	//---- Reset count for TIMER 1 (16 bits)
+d81 1
+a81 4
+
+	//---- Update counter.
+	if ( g_iDebounceCount > 0 )
+		g_iDebounceCount--;
+d111 6
+d122 1
+d126 2
+a127 2
+	DDRB	|= BIT_LED_ALL;	// Enable LEDs as OUTPUT
+	PORTB |= BIT_LED_ALL;	// Set LEDs to OFF
+@
+
+
+1.3
+log
+@updated
+@
+text
+@d3 2
+a4 2
+// $Revision: 1.2 $
+// $Date: 2022/05/09 17:33:40 $
+d37 1
+a37 2
+//#define	CNT_DEBOUNCE	5		// Debounce delay (# of 10ms) - quality components
+#define	CNT_DEBOUNCE	10		// Debounce delay (# of 10ms) -- shield w/ shitty switches...
+d50 1
+a50 1
+static	uint8_t	g_uDebounceCount = 0;	// Debounce delay count
+d61 2
+a62 2
+	if ( g_uDebounceCount > 0 )
+		g_uDebounceCount--;
+d68 1
+a68 1
+void	button_process( uint8_t in_uOldState, uint8_t in_uNewState )
+d70 1
+a70 1
+	if ( in_uNewState & BIT_BUT1 )		// BUTTON 1
+d75 1
+a75 1
+	if ( in_uNewState & BIT_BUT2 )		// BUTTON 2
+d80 1
+a80 1
+	if ( in_uNewState & BIT_BUT3 )		// BUTTON 3
+d105 1
+a105 1
+	g_uDebounceCount = 0;
+d123 1
+a123 1
+		if ( g_uDebounceCount ) continue;
+d125 2
+a126 1
+		//---- Process + start a counter if any button has changed.
+d130 20
+a149 3
+			button_process( l_uOldState, l_uNewState );	// process the buttons
+			l_uOldState      = l_uNewState;			// capture new state;
+			g_uDebounceCount = CNT_DEBOUNCE;		// start counter for debounce
+a150 1
+		}
+@
+
+
+1.2
+log
+@update bounced.
+@
+text
+@d3 2
+a4 2
+// $Revision: 1.1 $
+// $Date: 2022/04/30 00:43:17 $
+d7 1
+a7 1
+//	BUTTON:	Debounced button press application with timer
+d9 1
+a9 1
+//	BOARD:	Arduino Nano v3 (Abra Electronics)
+d12 2
+d15 2
+a16 2
+//		LED: 	PB5
+//		BUTTON:	PB2
+d19 4
+a22 4
+//              16MHz / 1024            = 15625         -- 1s
+//              16MHz / 1024  / 20      = 781           -- 50ms
+//              16MHz / 1024  / 100     = 156           -- 10ms
+//              16MHz / 1024  / 1000    = 16            -- 1ms
+d24 2
+a25 1
+//              TNCT1 = 65536 - 156 = 65380           -- 10ms timer
+d36 11
+a46 4
+#define	TM1_COUNT	65380		// See calculations above
+#define	CNT_DEBOUNCE	5		// Debounce delay (# of 10ms)
+#define	BIT_LED		0b00100000	// LED    -- Port B, Bit 5
+#define	BIT_BUT		0b00000100	// BUTTON -- Port B, Bit 2
+d51 1
+a51 1
+static unsigned g_uCount = 0;	// Debouce delay count
+d61 3
+a63 4
+	//---- Update counter. Avoid rollover.
+	g_uCount++;
+	if ( g_uCount > 1000 );
+		g_uCount = 10;
+d67 1
+a67 1
+//---- ISR - TIMER 1 Interrupt Service Routine 
+d69 18
+d88 3
+a90 5
+//===========================================================
+//====
+//==== Main -- Initialize TIMER1, LED(PB5), and loop
+//====
+//===========================================================
+d100 11
+a110 10
+	//---- Set LED to OFF
+	DDRB	|= BIT_LED;	// Enable LED as OUTPUT (Default LED)
+	PORTB = PORTB & (~BIT_LED);
+
+	//---- Set current button state.
+	PORTB	|= BIT_BUT;	// Enable pullup on BUT pin
+	uint8_t l_uPressed = PINB & BIT_BUT ? 1 : 0;
+
+	//---- Infinite loop, waiting for interrupts
+	g_uCount = 0;
+d113 20
+a132 2
+		//---- Check current state.
+		uint8_t l_uState = PINB & BIT_BUT ? 1 : 0;
+a133 10
+		//---- Start a counter is state has changed.
+		if ( l_uState != l_uPressed )
+		{
+			l_uState = l_uPressed;	// capture new state;
+			g_uCount = 0;		// start counter
+		}
+		//---- Check if state has changed since
+		else if ( g_uCount > 5 )
+		{
+			PORTB ^= BIT_LED;	// flip LED
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d3 2
+a4 2
+// $Revision: 1.5 $
+// $Date: 2022/04/29 21:48:10 $
+d7 1
+a7 1
+//	BLINK: Default blink test application 
+d9 2
+a10 1
+//	BOARD: Arduino Nano v3 (Abra Electronics)
+d12 11
+d31 1
+a31 1
+//----- Defines for TIMER1
+d33 4
+a36 1
+#define	TM1_COUNT_125MS	63974		// 125ms delay at 16MHz
+d39 1
+a39 1
+//----- Global Vars
+d41 1
+a41 1
+static	int	g_iCount = 0;
+d44 1
+a44 1
+//----- ISR - TIMER 1 Interrupt Service Routine
+d48 7
+a54 7
+	g_iCount ++;
+	if ( g_iCount == 7 )
+	{
+		PORTB ^= 0b00100000;	// Toggle PB5 (Default LED)
+		g_iCount = 0;
+	}
+	TCNT1 = TM1_COUNT_125MS;	// Reset Counter
+d57 4
+d62 3
+a64 3
+//=====
+//===== Main -- Initialize TIMER1, LED(PB5), and loop
+//=====
+d68 14
+a81 6
+	DDRB	|= 0b00100000;		// Enable PB5 as OUTPUT (Default LED)
+	TCNT1	= TM1_COUNT_125MS;	// Reset count for TIMER 1 (16 bits)
+	TCCR1A	= 0b00000000;		// Timer/Counter 1 Register A - Reset
+	TCCR1B	= 0b00000101;		// Timer/Control 1 Register B - Set 1024 prescaler
+	TIMSK1	= 0b00000001;		// Timer/Counter 1 Interrupt Mask Resigter - Overflow Interrupt Overflow Enabled
+	sei();				// Enable interrupts
+d84 18
+a101 1
+	for(;;) {}
+@
