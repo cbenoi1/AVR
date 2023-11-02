@@ -154,7 +154,7 @@ int main()
 		//----
 		//---- LED4X8 PROCESSING
 		//----
-		if ( g_uLed4x8Pulse == 0 )
+		if ( g_uLed4x8Pulse == 0 )	// 5ms done
 		{
 			LED4X8_PIN_CS_LOW();
 			led4x8_shift_out( g_uDigit[ g_uCurrDigit ] );
@@ -162,21 +162,21 @@ int main()
 			LED4X8_PIN_CS_HIGH();
 			g_uCurrDigit++;
 			g_uCurrDigit = g_uCurrDigit % 4;
-			g_uLed4x8Pulse = CNT_LED4X8;
+			g_uLed4x8Pulse = CNT_LED4X8;	// reset counter
 		}
 
 		//----
 		//---- BUTTON PROCESSING
 		//----
-		if ( g_uButtonsPulse == 0 )
+		if ( g_uButtonsPulse == 0 )	// 50ms done
 		{
 			//---- Check button
 			uint8_t l_uNewState = PINC & BIT_BUT_ALL;
 			if ( l_uNewState != l_uOldState )
 			{
 				//---- Changed, so start a blackout period and process
-				l_uOldState			= l_uNewState;
-				g_uButtonsPulse		= CNT_DEBOUNCE;
+				l_uOldState		= l_uNewState;
+				g_uButtonsPulse		= CNT_DEBOUNCE;	// reset counter
 				button_process( l_uOldState );
 			}
 		}
