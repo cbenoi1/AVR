@@ -37,7 +37,7 @@
 //--------------------------------
 //---- Defines
 //--------------------------------
-#define	TM0_COUNT		240		// 10ms - See calculations above
+#define	TM0_COUNT		240		// 1ms - See calculations above
 #define	TM1_COUNT		49911		// 1s   - See calculations above
 #define	CNT_DEBOUNCE		50		// Debounce delay (# of 1ms)
 #define	CNT_LED4X8		5		// LED4X8 update rate (# of 1ms)
